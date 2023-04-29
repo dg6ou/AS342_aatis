@@ -19,4 +19,4 @@ Modifizierter Sketch für den AATiS Bausatz AS342 Locator &amp; Uhr  / Praxishef
     Über AS342MOD=1 kann eine Version erzeugt werden, bei der das GPS an rxPin = 8; txPin = 9; angeschlossen wird. Hierbei wird über diese Pins die serielle Schnittstelle fürs GPS per
     Software ( AltSoftSerial https://www.pjrc.com/teensy/td_libs_AltSoftSerial.html, verfügbar in IDE) relasiert, die Daten von Modul($G.GGA und Displayanzeige) werden dann zur seriellen Schittstelle des Arduino geschickt.
     Das LCD wird hierbei über I2C angeschlossen (PCF8574 I2C Adapter an 0x27, Anschlüsse vom PCF8574 zum Display sind vom Adapter abhängig und müssen ggf. im Quellcode (LiquidCrystal_I2C LCD...)angepasst werden
-    https://github.com/fmalpartida/New-LiquidCrystal NICHT verfügbar in IDE)
+    https://github.com/fmalpartida/New-LiquidCrystal NICHT verfügbar in IDE) 
