@@ -1,4 +1,4 @@
-AATiS AS342 Locator & Uhr / Praxisheft 32, S. 36
+# AATiS AS342 Locator & Uhr / Praxisheft 32, S. 36
     Modifiziert Version V3
      neu hinzu,
         Eine weitere Sicht im Display, Akutelle Zeit in ME(S)Z mit dem Datum (tnx an Mario DG1FI für den Tip)
