@@ -1,4 +1,21 @@
+
+
+
 /*  AATiS AS342 Locator & Uhr / Praxisheft 32, S. 36
+    Modifiziert Version V3
+     neu hinzu,
+        Eine weitere Sicht im Display, Akutelle Zeit in ME(S)Z mit dem Datum (tnx an Mario DG1FI für den Tip)
+     Dazu ist sind ein paar Änderungen bei den Bibliothek notwendig.
+      - NMEA Daten vom GPS werden jetzt über die Bibliothek TinyGPSPlus ausgewertet (Version 1.1.0)
+        Download Master unter https://github.com/mikalhart/TinyGPSPlus
+        Die in der IDE installierbare Version von TinyGPSPlus ist zu alt und liefert nicht alle Funktionen
+      - Für die Zeitfunktionen und Sommerzeitberechnung die Bibliothek  Time in Version 1.6.1, ist in der IDE Verfügbar.
+      - UTC als Info zur Zeit bei der Locatoranzeige angezeigt
+      - Anzeige Anzahl der empfangenen Sats und die Qualität umgestellt, nun zweizeilige am Ende einer Zeile.
+        erste Zeile Sxx für die Anzahl, Qx für die Qualität
+
+    Die Einstellungen #define AS342MOD bleiben wir bisher, für AS342 muss #define AS342MOD 0 eingestellt werden.
+
     Modifiziert Version
     - Taster an Pin D7 (Digital Pin) gegen Masse kurz gedrückt,  schaltet um zwischen Locator/Uhr, Koordinaten in Grad/Minuten/Sekunden und Koordinaten in Grad Minten in Dezimal
     - Taster an Pin D7 (Digital Pin) gegen Masse länger (>1 Sekunde) gedrückt, Helligkeit vom LCD kann eingestellt werden, Wenn gewünsche Helligkeit erreicht, loslassen, wird aber nicht gespeichert.
@@ -21,14 +38,12 @@
     https://github.com/fmalpartida/New-LiquidCrystal NICHT verfügbar in IDE)
 
 */
-
-#define AS342MOD 0
-
+#define AS342MOD 1
 
 #if AS342MOD == 0
 #include <LiquidCrystal.h>
 LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
-#define DEBUGln(...) Serial.println(__VA_ARGS__)
+
 #else
 #include "LiquidCrystal_I2C.h"
 LiquidCrystal_I2C lcd(0x27, 4, 5, 6, 0, 1, 2, 3, 7, NEGATIVE);
@@ -36,87 +51,226 @@ LiquidCrystal_I2C lcd(0x27, 4, 5, 6, 0, 1, 2, 3, 7, NEGATIVE);
                      uint8_t d4, uint8_t d5, uint8_t d6, uint8_t d7,
                      uint8_t backlighPin, t_backlighPol pol);
 */
+#endif
+#include <TimeLib.h>
+#define DEBUGln(...) Serial.println(__VA_ARGS__)
+
+const byte pwmdat[]  = {1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 10, 11, 12, 14, 15,
+                        16, 18, 19, 21, 23, 25, 27, 30, 32, 35, 38, 42, 45, 50, 54, 59, 64, 70, 76, 83, 91, 99, 108, 117, 128, 139,
+                        152, 166, 181, 197, 215, 234, 255
+                       };
+byte helligkeitidx = 48;
+boolean changehelligkeit = true;
+
+enum ArtLATLNG {LAT = 0, LNG = 1};
+enum AusgabeType {DIS = 0, SER = 1};
+
+int displaystate = 0;
+int GpsState = 0;
+int OldGpsState = -1;
+//boolean mustclear = true;
+boolean tastergedrueckt = true;
+boolean locktaster = false;
+long tastermillis;
+long hellmillis;
+boolean moddisplaystate = false;
+long OldFixStatus;
+
+long       noGPSDatamillis = 0;
+uint32_t       lastgpscharsProcessed = 0;
+boolean noGPSData;
 #include <AltSoftSerial.h>
 const byte rxPin = 8;
 const byte txPin = 9;
-AltSoftSerial GPSSerial (rxPin, txPin, false);
-#define DEBUGln(...) Serial.println(__VA_ARGS__)
-#endif
-
-const char compile_date[]  = __DATE__ " " __TIME__;
-const byte tasterPin = 7;
-const byte DisplayBeleuchtungPin = 6;
-const byte pwmdat[]  = {1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 10, 11, 12, 14, 15,
-                        16, 18, 19, 21, 23, 25, 27, 30, 32, 35, 38, 42, 45, 50, 54, 59, 64, 70, 76, 83, 91, 99, 108, 117, 128, 139, 152, 166, 181, 197, 215, 234, 255
-                       };
-
-enum AusgabeType {LCD = 0, SER = 1};
 
 
 
-float calcDegrees(String input);
-String calcLocator(float lat, float lon);
-int displaystate = 0;
-boolean locktaster = false;
-boolean firstrun = true;
-boolean mustclear = true;
-long tastermillis;
-long hellmillis;
-long noGPSDataCounter;
-boolean tastergedrueckt = true;
-byte helligkeit = 32;
-boolean changehelligkeit = true;
-boolean moddisplaystate = false;
-String oldquality = "0";
+#include <TinyGPSPlus.h>
+
+/*
+   This sample code demonstrates the normal use of a TinyGPSPlus (TinyGPSPlus) object.
+   It requires the use of SoftwareSerial, and assumes that you have a
+   4800-baud serial GPS device hooked up on pins 4(rx) and 3(tx).
+*/
+
+const char compile_date[] PROGMEM = __DATE__ " " __TIME__;
+const char FormatStrTIME[] PROGMEM =  "%02d:%02d:%02d %s";
+const char FormatStrDATE[] PROGMEM =  "%c%c %02d.%02d.%4d";
+
+static const int RXPin = 8, TXPin = 9;
+static const uint32_t GPSBaud = 9600;
+static const byte tasterPin = 7;
+static const byte DisplayBeleuchtungPin = 6;
+String teststr;
+float h = 23;
+float fac = 1;
 
 
+char FormatStrbuffer[20];
+char sz[32];
 
-void setup() {
-  Serial.begin(9600);
-  DEBUGln(F("AATiS AS342 - DF1HPK / DG6OU"));
-  DEBUGln(compile_date);
+// The TinyGPSPlus object
+TinyGPSPlus gps;
 
+// The serial connection to the GPS device
+AltSoftSerial ss(rxPin, txPin, false);
+
+void setup()
+{
 #if AS342MOD == 1
-  // Define pin modes for TX and RX
-  pinMode(rxPin, INPUT);
-  pinMode(txPin, OUTPUT);
-  // Set the baud rate for the SoftwareSerial object
-  GPSSerial.begin(9600);
-  if (GPSSerial.isListening()) {
-    DEBUGln(F("GPSSerial is listening!"));
-  }
+  Serial.begin(115200);
+  ss.begin(GPSBaud);
+  Serial.println(F("input"));
+  ss.setTimeout(500);
+#else
+  Serial.begin(GPSBaud);
 #endif
-
   lcd.begin(16, 2);
   lcd.setCursor(0, 0);
-  lcd.print(F("AATiS AS342"));
+  lcd.print(F("AATiS AS342 "));
   lcd.setCursor(0, 1);
   lcd.print(F("DF1HPK / DG6OU"));
-
   pinMode(tasterPin, INPUT_PULLUP);
   pinMode(DisplayBeleuchtungPin, OUTPUT);
+  analogWrite(DisplayBeleuchtungPin, pwmdat[helligkeitidx]);
   changehelligkeit = true;
-  analogWrite(DisplayBeleuchtungPin, helligkeit);
-  delay(1000);
-  lcd.setCursor(0, 1);
-  lcd.print(F("Warte GPS-Daten"));
-  firstrun = true;
-  noGPSDataCounter = millis();
+  noGPSData = true;
+  OldFixStatus = 0;
+  OldGpsState = -1;
 }
 
-void write_AnzSatQual(String numOfSat, String quality ) {
-  lcd.setCursor(13, 0);
-  lcd.print("S");
-  lcd.setCursor(14, 0);
-  lcd.print(numOfSat);
-  lcd.setCursor(14, 1);
-  lcd.print("Q");
-  lcd.setCursor(15, 1);
-  lcd.print(quality);
+void loop()
+{
+  char wday[14] = "SoMoDiMiDoFrSa";
+  String spaces = "     ";
+  boolean summertime;
+
+  smartDelay(1000);
+  /*
+  Serial.print(gps.sentencesWithFix()); Serial.print("|");
+  Serial.print(gps.time.isValid()); Serial.print("|"); Serial.print((char)gps.location.isValid()); Serial.print("|");
+  Serial.print(gps.satellites.value()); Serial.print("|");
+  Serial.print((char)gps.location.FixQuality()); Serial.print("|"); Serial.print(GpsState); Serial.print("|");
+  Serial.print(displaystate); Serial.print("|");
+  Serial.println(gps.time.age());
+  */
+  if (OldGpsState != GpsState) {
+    lcd.clear();
+    OldGpsState = GpsState;
+  }
+
+  if (( (gps.sentencesWithFix() - OldFixStatus)  > 0 ) && ! noGPSData) {
+    GpsState = 5;
+    OldFixStatus = gps.sentencesWithFix();
+    switch (displaystate) {
+      case 0:
+
+        lcd.setCursor(0, 0);//lcd.print(displaystate + 48);
+        sz[0] = 0;
+        strcpy_P(FormatStrbuffer, FormatStrTIME);
+        snprintf(sz, sizeof(sz), FormatStrbuffer , gps.time.hour(), gps.time.minute(), gps.time.second(), "UTC");
+        lcd.print(sz);
+        lcd.setCursor(0, 1);
+        lcd.print(calcLocator((gps.location.lat()), (gps.location.lng())));
+        write_AnzSatQual(gps.satellites.value(), gps.location.FixQuality());
+        teststr = String(gps.altitude.meters(), 0) + "m" ;
+        teststr = spaces.substring(1, 6 - teststr.length()) + teststr;
+        lcd.setCursor(8, 1);
+        lcd.print(String(teststr ));
+        break;
+      case 1:
+        lcd.setCursor(0, 0); //lcd.print(displaystate + 48);
+        lcd.print(DegreesToDegMinSec(gps.location.lat(), LAT, DIS));
+        lcd.setCursor(0, 1);
+        lcd.print(DegreesToDegMinSec(gps.location.lng(), LNG, DIS));
+        break;
+      case 2:
+        lcd.setCursor(0, 0); //lcd.print(displaystate + 48);
+        lcd.print(abs(gps.location.lat()), 6);
+        lcd.print(((gps.location.lat() > 0) ? "N" : "S"));
+        lcd.setCursor(0, 1);
+        lcd.print(abs(gps.location.lng()), 6);
+        lcd.print(((gps.location.lng() > 0) ? "E" : "W"));
+        break;
+      case 3:
+        lcd.setCursor(0, 0);
+        setTime(gps.time.hour(), gps.time.minute(), gps.time.second(), gps.date.day() , gps.date.month(), gps.date.year());
+        if (summertime_EU(year(), month(), day(), hour(), 0)) {
+          adjustTime(7200);
+          summertime = true;
+        } else {
+          adjustTime(3600);
+          summertime = false;
+        }
+        sz[0] = 0;
+        strcpy_P(FormatStrbuffer, FormatStrTIME);
+        snprintf(sz, sizeof(sz), FormatStrbuffer ,  hour(), minute(), second(), ((summertime) ? "MESZ" : "MEZ"));
+        lcd.print(sz);
+        lcd.setCursor(0, 1);
+        sz[0] = 0;
+        strcpy_P(FormatStrbuffer, FormatStrDATE);
+        snprintf(sz, sizeof(sz), FormatStrbuffer , wday[(weekday() - 1) * 2], wday[(weekday() - 1) * 2 + 1] , day(), month(), year());
+        lcd.print(sz);
+        break;
+    }
+    write_AnzSatQual(gps.satellites.value(), gps.location.FixQuality());
+#if AS342MOD == 1
+    Serial.print(F("LAT=")); Serial.print(gps.location.lat(), 6); // Latitude in degrees (double)
+    Serial.print(F(" LNG=")); Serial.print(gps.location.lng(), 6); // Longitude in degrees (double)
+    Serial.print(F(" ALT="));  Serial.print(gps.altitude.meters());
+    Serial.print(F(" LOC=")); Serial.println(calcLocator((gps.location.lat()), (gps.location.lng())));
+#endif
+  }
+  else {
+    lcd.setCursor(0, 0);
+    if (noGPSData ) {
+      lcd.clear();
+      lcd.print(F("Keine GPS Daten"));
+      GpsState = 2;
+    }
+    else
+      //   { if (gps.sentencesWithFix() > 0) {
+    { if ((gps.date.isValid()) && (gps.date.day() > 0)) {
+        sz[0] = 0;
+        strcpy_P(FormatStrbuffer, FormatStrTIME);
+        snprintf(sz, sizeof(sz), FormatStrbuffer , gps.time.hour(), gps.time.minute(), gps.time.second(), "UTC");
+        GpsState = 3;
+      } else
+      {
+        sprintf(sz, "--:--:--");
+        GpsState = 4;
+      }
+
+      lcd.print(sz);
+
+      write_AnzSatQual(gps.satellites.value(), gps.location.FixQuality());
+      lcd.setCursor(0, 1);
+      /*12345678901234567 */
+      lcd.print("keine Pos.");
+      OldFixStatus = gps.sentencesWithFix() ;
+    }
+  }
+#if AS342MOD == 0
+  Serial.print(gps.sentencesWithFix()); Serial.print("|");
+  Serial.print(GpsState); Serial.print("|");
+  Serial.print(gps.satellites.value()); Serial.print("|");
+  Serial.println((char)gps.location.FixQuality());
+#endif
+  if ((millis() - noGPSDatamillis) > 1000 && (gps.charsProcessed() - lastgpscharsProcessed) < 10) {
+    Serial.println(F("No GPS data received: check wiring"));
+    noGPSDatamillis = millis();
+    lastgpscharsProcessed = gps.charsProcessed();
+    noGPSData = true;
+    GpsState = 1;
+  }
+  else
+  {
+    noGPSData = false;
+    lastgpscharsProcessed = gps.charsProcessed();
+  }
 }
 
-void loop() {
-
+static void checktaster() {
   if ( digitalRead(tasterPin) == 0 && !tastergedrueckt) {
     tastermillis = millis();
     tastergedrueckt = true;
@@ -124,19 +278,16 @@ void loop() {
   }
 
   if ( digitalRead(tasterPin) == 0  && tastergedrueckt &&  locktaster && (millis() - tastermillis) > 1000) {
-    if (millis() - hellmillis > pwmdat[helligkeit]) {
+    if (millis() - hellmillis > pwmdat[helligkeitidx]) {
       changehelligkeit = true;
       moddisplaystate = false;
-      noGPSDataCounter = millis();
       hellmillis = millis();
-      helligkeit++;
-      if (helligkeit > 64) {
-        helligkeit = 0;
+      helligkeitidx++;
+      if (helligkeitidx > 64) {
+        helligkeitidx = 0;
       }
     }
   }
-
-
 
   if ( digitalRead(tasterPin) == 0 && tastergedrueckt &&  !locktaster && (millis() - tastermillis) > 75) {
     moddisplaystate = true;
@@ -147,209 +298,73 @@ void loop() {
     locktaster = false;
     tastergedrueckt = false;
     changehelligkeit = false;
-    if (moddisplaystate) {
+    if (moddisplaystate && (GpsState == 5)) {
       displaystate = displaystate + 1  ;
       moddisplaystate = false;
-      mustclear = true;
-      if (displaystate >= 3 ) {
+      OldGpsState--;
+      if (displaystate >= 4 ) {
         displaystate = 0;
       }
     }
   }
+  if ( changehelligkeit ) {
+    analogWrite(DisplayBeleuchtungPin, pwmdat[int(helligkeitidx)]);
+  }
+}
 
+
+static void smartDelay(unsigned long ms)
+{
+  unsigned long start = millis();
+  do
+  {
 #if AS342MOD == 1
-  if (GPSSerial.available() > 0 && !changehelligkeit) {
-    String input = GPSSerial.readStringUntil('\n');
+    while (ss.available()) {
+      gps.encode(ss.read());
+    }
 #else
-  if (Serial.available() > 0 && !changehelligkeit) {
-    String input = Serial.readStringUntil('\n');
+    while (Serial.available()) {
+      gps.encode(Serial.read());
+    }
 #endif
 
-    if (input.startsWith("$GNGGA") || input.startsWith("$GPGGA")) {
-      if ( firstrun ) {
-        firstrun = false;
-        mustclear = true;
-      }
-      noGPSDataCounter = millis();
-      DEBUGln(input);
-      input.remove(input.length() - 1, 1);
-      input.remove(0, input.indexOf(',') + 1);
-      String utc = input.substring(0, input.indexOf(','));
-      if (utc.length() == 0) {utc="------";}
-      input.remove(0, input.indexOf(',') + 1);
-      String lat = input.substring(0, input.indexOf(','));
-      input.remove(0, input.indexOf(',') + 1);
-      lat.concat(input.substring(0, input.indexOf(',')));
-      input.remove(0, input.indexOf(',') + 1);
-      String lon = input.substring(0, input.indexOf(','));
-      input.remove(0, input.indexOf(',') + 1);
-      lon.concat(input.substring(0, input.indexOf(',')));
-      input.remove(0, input.indexOf(',') + 1);
-      String quality = input.substring(0, input.indexOf(','));
-      input.remove(0, input.indexOf(',') + 1);
-      String numOfSat = input.substring(0, input.indexOf(','));
-      input.remove(0, input.indexOf(',') + 1);
-      input.remove(0, input.indexOf(',') + 1);
-      String alt = input.substring(0, input.indexOf(','));
-      input.remove(0, input.indexOf(',') + 1);
-      alt.concat(input.substring(0, input.indexOf(',')));
-      if (oldquality != quality) {
-        mustclear = true;
-        oldquality = quality;
-      }
-      if (mustclear) {
-        lcd.clear();
-        mustclear = false;
-      }
-      if (!quality.equals("0")) {
-        switch (displaystate ) {
-          case 0:
-            lcd.setCursor(0, 0);
-            lcd.print(utc.substring(0, 2));
-            lcd.print(":");
-            lcd.print(utc.substring(2, 4));
-            lcd.print(":");
-            lcd.print(utc.substring(4, 6));
-            lcd.setCursor(0, 1);
-            lcd.print(calcLocator(calcDegrees(lat), calcDegrees(lon)));
-            DEBUGln(calcDegrees(lat), 5);
-            DEBUGln(calcDegrees(lon), 5);
-            DEBUGln(calcLocator(calcDegrees(lat), calcDegrees(lon)));
-
-            lcd.setCursor(9, 0);
-            lcd.print("S:");
-            lcd.setCursor(11, 0);
-            lcd.print(numOfSat);
-            lcd.setCursor(14, 0);
-            lcd.print("Q");
-            lcd.setCursor(15, 0);
-            lcd.print(quality);
-
-            if (alt.length() == 7) {
-              lcd.setCursor(9, 1);
-            } else if (alt.length() == 6) {
-              lcd.setCursor(10, 1);
-            } else if (alt.length() == 5) {
-              lcd.setCursor(11, 1);
-            } else if (alt.length() == 4) {
-              lcd.setCursor(12, 1);
-            } else {
-              lcd.setCursor(0, 1);
-            }
-            lcd.print(alt);
-                  DEBUGln(alt);
-            break;
-          case 1:
-            DEBUGln(calcGMS(lat, SER));
-            DEBUGln(calcGMS(lon, SER));
-
-            lcd.setCursor(0, 0);
-            lcd.print(calcGMS(lat, LCD));
-            lcd.setCursor(0, 1);
-            lcd.print(calcGMS(lon, LCD));
-            write_AnzSatQual(numOfSat, quality);
-            break;
-          case 2:
-            float fllat = calcDegrees(lat);
-            float fllon = calcDegrees(lon);
-            DEBUGln(fllat, 6);
-            DEBUGln(fllon, 6);
-        
-            lcd.setCursor(0, 0);
-            lcd.print(fllat, 6);
-            lcd.print(lat.substring(lat.length() - 1));
-            lcd.setCursor(0, 1);
-            if (fllat >= 100) {lcd.print("0");}
-            if (fllon < 10) {lcd.print("0");}
-            lcd.print(fllon, 6);
-            lcd.print(lon.substring(lon.length() - 1));
-            write_AnzSatQual(numOfSat, quality);
-            break;
-        }
-      } else {
-        if (mustclear) {
-          lcd.clear();
-          mustclear = false;
-        }
-        lcd.setCursor(0, 0);
-        lcd.print(utc.substring(0, 2));
-        lcd.print(":");
-        lcd.print(utc.substring(2, 4));
-        lcd.print(":");
-        lcd.print(utc.substring(4, 6)); 
-      
-        write_AnzSatQual(numOfSat, quality);
-        lcd.setCursor(0, 1);
-                   /*12345678901234567 */
-          lcd.print("keine Pos.");
-
-      }
-    }
-  }
-  else
-  {
-    if (  (millis() - noGPSDataCounter)  > 10000 && !changehelligkeit)
-    {
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print(F("Keine GPS Daten"));
-      DEBUGln(F("Keine GPS Daten"));
-      DEBUGln(noGPSDataCounter);
-      noGPSDataCounter = millis();
-      firstrun = true;
-    }
-  }
-
-
-  if ( changehelligkeit ) {
-    //changehelligkeit = false;
-    analogWrite(DisplayBeleuchtungPin, pwmdat[int(helligkeit)]);
-  }
-
+    checktaster();
+  } while (millis() - start < ms);
 }
 
-// NMEA Format (d)ddmm.mmmmm
-// (d)dd + (mm.mmmmm / 60) = degrees
-float calcDegrees(String input) {
-  String direction = input.substring(input.length() - 1);
-  String dddSt = input.substring(0, input.indexOf('.'));
-  dddSt.remove(dddSt.length() - 2, dddSt.length() - 1);
-  int ddd = dddSt.toInt();
-  String mSt = input.substring(input.indexOf('.') - 2, input.length() - 1);
-  float m = mSt.toFloat();
-  float result = ddd + (m / 60);
-  if (direction.equals("W") || direction.equals("S")) {
-    result *= (-1);
-  }
-
-  return result;
-}
-
-String calcGMS(String input, int Ausgabetype) {
-  char Ausgabegradzeichen[2] = {0xdf, 0xb0};
-  String direction = input.substring(input.length() - 1);
-  String dddSt = input.substring(0, input.indexOf('.'));
-  dddSt.remove(dddSt.length() - 2, dddSt.length() - 1);
-  int ddd = dddSt.toInt();
-  String mSt = input.substring(input.indexOf('.') - 2, input.length() - 1);
-  float m = mSt.toFloat();
-  float s = (m - (int(m))) * 60;
+String DegreesToDegMinSec(float x, int NSEW, int Ausgabetype) {
+  int ddd = x;
+  char NSEWData[5] = "NSEW";
+  char Hemi = NSEWData[(NSEW * 2) + ((ddd > 0) ? 0 : 1)];
+  char Ausgabegradzeichen[2] = {0xdf, 0xb0}; //Grad für lcd oder konsole
+  float minutesRemainder = abs(x - ddd) * 60;
+  int arcMinutes = (int)minutesRemainder;
+  float arcSeconds = (float)((minutesRemainder - arcMinutes) * 60);
   String gms = "";
-  gms = ((round(ddd) > 9) ? "" : "0") +  String(ddd) + char(Ausgabegradzeichen[Ausgabetype] )  +  ((round(m) > 9) ? "" : "0") + String(round(m)) + "'" +  ((round(s) > 9) ? "" : "0" ) +  String(s, 1) + "\"" + direction;
+  gms = ((abs(round(ddd)) > 9) ? "" : "0") +  String(abs(ddd)) + char(Ausgabegradzeichen[Ausgabetype] )  +  ((round(arcMinutes) > 9) ? "" : "0") + String(round(abs(arcMinutes))) + "'" +  ((round(arcSeconds) > 9) ? "" : "0" ) +  String(abs(arcSeconds + 0.0000001), 1) + "\"" + Hemi;
   return gms;
 }
 
+boolean summertime_EU(int year, byte month, byte day, byte hour, byte tzHours)
+// European Daylight Savings Time calculation by "jurs" for German Arduino Forum
+// input parameters: "normal time" for year, month, day, hour and tzHours (0=UTC, 1=MEZ)
+// return value: returns true during Daylight Saving Time, false otherwise
+{
+  if (month < 3 || month > 10) return false; // keine Sommerzeit in Jan, Feb, Nov, Dez
+  if (month > 3 && month < 10) return true; // Sommerzeit in Apr, Mai, Jun, Jul, Aug, Sep
+  if (month == 3 && (hour + 24 * day) >= (1 + tzHours + 24 * (31 - (5 * year / 4 + 4) % 7)) || month == 10 && (hour + 24 * day) < (1 + tzHours + 24 * (31 - (5 * year / 4 + 1) % 7)))
+    return true;
+  else
+    return false;
+}
 
 String calcLocator(float lat, float lon) {
   const double DEG_25 = 2.5 / 60 * 1000; // 2.5 degrees
   const double DEG_50 = 5.0 / 60 * 1000; // 5.0 degrees
-
   double dLon = min( 180 + lon, 359.999999999);
   double dLat = min( 90 + lat, 179.999999999);
-
   long workingLon = (long)(dLon * 1000);
   long workingLat = (long)(dLat * 1000);
-
   String locator = "";
   locator += char(0x41 + (int)(workingLon / 20000));
   locator += char(0x41 + (int)(workingLat / 10000));
@@ -357,6 +372,15 @@ String calcLocator(float lat, float lon) {
   locator += char(0x30 + (int)((workingLat % 10000) / 1000));
   locator += char(0x61 + (int)((workingLon % 20000 % 2000) / DEG_50 ));
   locator += char(0x61 + (int)((workingLat % 10000 % 1000) / DEG_25 ));
-
   return locator;
+}
+
+void write_AnzSatQual(int numOfSat, char quality ) {
+  lcd.setCursor(13 + ((numOfSat > 9) ? 0 : 1), 0);
+  lcd.print("S");
+  lcd.print(numOfSat);
+  lcd.setCursor(14, 1);
+  lcd.print("Q");
+  lcd.setCursor(15, 1);
+  lcd.print(quality);
 }
